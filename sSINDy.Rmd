@@ -1,0 +1,238 @@
+---
+title: "S610-Final_Project-sSINDy"
+author: "ChunHsien Lu"
+date: "12/11/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE,echo=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+# --- functions --- #
+
+#' @param data_X (numeric) data of X
+#' @param data_y (numeric) data of y
+#' @return (numeric) How many time a variable is chosen
+
+order_coef=function(data_X,data_y){
+  n=ncol(data_X)
+  order_col=rep(n,n)
+  coef_dot=rep(TRUE,n)
+  Xi=rep(0,n)
+  
+  for(i in 1:(n-1)){
+    Xi[coef_dot]= MASS::ginv(data_X[,coef_dot],0) %*% data_y
+    order_col[coef_dot][which.min(abs(Xi[coef_dot]))]=i
+    coef_dot[coef_dot][which.min(abs(Xi[coef_dot]))]=FALSE
+  }
+  return(order_col)
+}
+
+
+#' @param data_X (numeric) data of X
+#' @param data_y (numeric) data of y
+#' @param cv_group (numeric) cv_group
+#' @param k_fold (numeric) k_fold cv
+#' @return (numeric) errors
+
+error_compute=function(data_X,data_y,cv_group,k_fold){
+  sum_error=0
+  if(ncol(data_X%>%as.matrix)>1){
+    for (i in 1:k_fold) {
+      data_X_train=data_X[cv_group==i,]
+      data_X_test=data_X[!cv_group==i,]
+      data_y_train=data_y[cv_group==i]
+      data_y_test=data_y[!cv_group==i]
+      Xi= MASS::ginv(data_X_train,0) %*% data_y_train
+      sum_error=sum_error+sum((data_y_test-data_X_test%*%Xi)^2)
+    }
+  }
+  else{
+    for (i in 1:k_fold) {
+      data_X_train=data_X[cv_group==i]
+      data_X_test=data_X[!cv_group==i]
+      data_y_train=data_y[cv_group==i]
+      data_y_test=data_y[!cv_group==i]
+      if(cov(data_X_train,data_X_train)==0){
+        sum_error=sum_error+sum((data_y_test-mean(data_y_train))^2)
+      }
+      else{
+        Xi= cov(data_X_train,data_y_train)/cov(data_X_train,data_X_train)
+        sum_error=sum_error+sum((data_y_test-data_X_test*Xi)^2)
+      }
+    }
+  }
+  return(sum_error)
+}
+
+
+#' @param data_X (numeric) data of X
+#' @param data_y (numeric) data of y
+#' @param k_fold (numeric) k_fold cv
+#' @return (list) list of some results
+
+sSINDy=function(data_X,data_y,k_fold){
+  library(magrittr)
+  
+  n_row=nrow(data_X)
+  n_col=ncol(data_X)
+  cv_group=sample(rep(1:k_fold,ceiling(n_row/k_fold)),n_row)
+  errors=rep(0,n_col+1)
+  coef_order=order_coef(data_X,data_y)
+  coef_final=rep(0,n_col)
+  
+  errors[2:(n_col+1)]=sapply((1:n_col),function(i)
+  {error_compute(data_X[,coef_order>=(n_col-i+1)],data_y,cv_group,k_fold)})
+  errors[1]=sum(data_y^2)*(k_fold-1)
+    
+  min_coef=which.min(errors)
+  if(min_coef==1){
+    coef_final=rep(0,n_col)
+  }
+  else{
+  coef_final[coef_order>(n_col-min_coef+1)]=
+    lm(data_y~data_X[,coef_order>(n_col-min_coef+1)]-1)%>%coef()
+  }
+  
+  return(list("coef_order"=coef_order,"cv_error"=errors,
+              "min#"=min_coef-1,"coef"=coef_final))
+}
+
+
+
+#' @param X (numeric) data of X
+#' @param n_order (numeric) order of expansion
+#' @return (numeric) expansion matrix
+
+# Generate the data upto nth order
+gene_poly_data=function(X,n_order){
+  order_X=function(i){X^i}
+  return(sapply((0:n_order), order_X))
+}
+
+```
+
+\section{Introduction}
+
+In this project, we mainly follow the paper written by Boninsegna et. al. This paper focuses on the reconstruction of an SDE. It does well on the example they provide. In order to understand the ideas provide in the paper, here, we attempt to apply the same method to Brownian motions(BMs). 
+
+Suppose $X_t$ is an Ito's stochastic process with constant diffusion, i.e.
+$$dX_t=b(X_t)dt+\sigma dB_t$$
+where $b$ and $\sigma$ are functions, $B_t$ is a BM. The following is two important properties that can help us to reconstruct $b$ and $\sigma$:
+$$b(x)=\lim_{s\rightarrow 0}\frac{1}{s} E[X_{t+s}-X_t|X_t=x]$$
+and
+$$\sigma(x)=\lim_{s\rightarrow 0}\frac{1}{s} E[(X_{t+s}-X_t)(X_{t+s}-X_t)|X_t=x].$$
+Since what we want to do is BM, $b(x)=0$ and $\sigma(x)=1$. From the two properties, fixed some small $h>0$,we try to fit $b(x)$ by using $[X_{(m+1)h}-X_{mh}]_m$ and $[X_{mh}]_m$. Furthermore, $\sigma(x)$ is via $[(X_{(m+1)h}-X_{mh})(X_{(m+1)h}-X_{mh})]_m$ and $[X_{mh}]_m$. 
+
+Intuitively, the algorithm proposed in the paper is just by using backward elimination and cross validation. The design matrix is $[M]_{ij}=[f_j(X_{ih})]_{ij}$ where $f_j$'s are possible candidates in $b(x)$. Assume $n$ functions $f_j$ are chosen. The full model is fitted as 
+$$(X_{(i+1)h}-X_{ih})\sim \sum_{j=1}^n \beta_jf_j(X_{ih}).$$
+by using all candidates. The smaller model with $k-1$ predicted variables is removed the one with lowest absolute value in the model with $k$ variables. Via this way, we can have $n+1$ possible models.($y=0$ is included) Now, CV comes into play to decide the best model. 
+
+The codes can be found in the following link: \newline
+https://github.com/Pielann/sto_SINDy.git
+
+\section{Simulation Design}
+\subsection{Fit the drift term and explain the output of sSINDy:}
+
+```{r,echo=FALSE,figure_height=3.5}
+set.seed(123)
+# Try to fit Brownian motion which start at x0=10
+end_time=1 #The end time of the Brownian motion
+n_times=1000 # How many time step b/t [0,end_time]
+
+X=sde::BM(x=10, t0=0, T=end_time, N=n_times) # Generate BM
+t_diff=end_time/n_times # Length of time interval
+y_data_diff=(X[2:(n_times+1)]-X[1:n_times])
+y_data=y_data_diff # Change of BM b/t time
+X_data=X[1:n_times] 
+plot(seq(0,1,by=t_diff),X,type="l",main="A path of a BM start at 10",
+     xlab="Time")
+
+```
+
+
+
+```{r}
+# Some facts for y_data
+#This plot should be similar to normal N(0,var=t)
+ggplot2::qplot(y_data_diff)
+
+qqnorm(y_data_diff)
+qqline(y_data_diff)
+
+cat(" mean:",mean(y_data_diff),"\n",
+    "variance:",var(y_data_diff))
+
+```
+Since $X_t$ is a BM, then $[X_{(m+1)h}-X_{mh}]_m$ should follow $N(0,h)$. We choose $h=0.001$ here. As shown above, the variance is 0.0009835, which is really closed to $h$.
+
+
+```{r, echo=FALSE}
+#############################################################
+## Model fitting
+n_fold=10 # folds of CV
+
+# Fit drift part
+# The real model is b(X)=0
+sSINDy(gene_poly_data(X_data,3),y_data,10)
+
+```
+We did it by 10-fold cross-validation(CV) to compare the models which are up to 3rd order. More precisely, we can compare the models 
+$$y=0,~y=\beta_{i_1}x^{i_1},~y=\beta_{i_1}x^{i_1}+\beta_{i_2}x^{i_2},~y=\beta_{i_1}x^{i_1}+\beta_{i_2}x^{i_2}+\beta_{i_3}x^{i_3},~y=\beta_{i_1}x^{i_1}+\beta_{i_2}x^{i_2}+\beta_{i_3}x^{i_3}+\beta_{i_4}x^{i_4},$$ 
+wehre $i_1,i_2,i_3,i_4\in\{0,1,2,3\}$ are distinct. The output "coef_order" express the order of the coefficients to be removed. $1$ means the first variable to be removed. Hence, the model with three variables is
+$$y=\beta_{0}+\beta_{1}x+\beta_{2}x^{2}$$
+since the fouth term is the first one to be thrown. "cv_error" denotes the total errors via CV for models with variables from $0$ to $3$. "min#" means the model with least errors. Moreover, the "coef" is the coefficients from the best choice. Surprisingly, the true function for drift term is $0$. It shows that, in this example, we do really rebuild the drift term. 
+
+
+\subsection{Compute the diffussion term:}
+```{r,echo=FALSE}
+plot(X_data,y_data,main="Changes vs Position",xlab="X",ylab="Diff of X")
+```
+Via above plot, it tells us that the variancess with respect to $X$ can help us compute $\sigma(x)$. We roughly observe the variances don't vary as $X$ changes. Moreover, since we just have a sample path and the fitting of $b(x)$ is constant zero, the true variance will be equal to the standard deviation of $$\left[\frac{X_{(m+1)h}-X_{mh}}{\sqrt{h}}\right]_m.$$
+Below comuptes the diffusion term from the sample path whichis $0.9917$. It is also really closed to $1$. Hence, the diffusion is rebuilt.
+
+```{r,echo=FALSE}
+cat("Diffusion Term: ", sd(y_data/sqrt(t_diff)))
+
+```
+
+
+\section{Confidence Intervals}
+\subsection{CI for Drift Terms}
+```{r,echo=FALSE}
+simulate_BM_drift=function(fun_sim,end_T,n_times,k_fold,order_poly=3){
+  t_diff=end_T/n_times
+  X=fun_sim(x=10, t0=0, end_T, n_times)
+  y_data=(X[2:(n_times+1)]-X[1:n_times])/t_diff
+  X_data=X[1:n_times]
+  return(sSINDy(gene_poly_data(X_data,order_poly),
+                    y_data,k_fold)$coef)
+}
+
+coef_sim=replicate(1000,simulate_BM_drift(sde::BM,1,1000,10))
+apply(coef_sim,1,quantile,prob=c(0.025,0.975))
+
+```
+This simulation shows that the 95% CI are 0 for 1000 samples which has really good performance.
+
+
+\subsection{CI for Diffussion Terms}
+```{r,echo=FALSE}
+# Simuation to check if we can reconstruct the diffusion term
+simulate_BM_diffusion=function(fun_sim,end_T,n_times){
+  t_diff=end_T/n_times
+  X=fun_sim(x=10, t0=0, end_T, n_times)
+  y_data=(X[2:(n_times+1)]-X[1:n_times])
+  return("Diffusion"=sd(y_data/sqrt(t_diff)))
+}
+
+coef_sim=replicate(100,simulate_BM_diffusion(sde::BM,1,10000))
+quantile(coef_sim,prob=c(0.025,0.975))
+
+```
+The true diffusion term for standard BM is 1. The CI contains the true value. 
+
+\section{References}
+Boninsegna et. al, Sparse learning of stochastic dynamical
+equations, J. Chem. Phys. 148, 241723 (2018).
